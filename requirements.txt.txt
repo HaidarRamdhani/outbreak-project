@@ -1,0 +1,8 @@
+pandas
+gspread
+google-auth
+transformers
+torch
+rapidfuzz
+flask
+gunicorn
