@@ -11,7 +11,11 @@ import re
 app = Flask(__name__)
 
 # 🔹 Load kredensial dari Railway Environment
-google_json = json.dumps(os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON"))
+google_json_str = json.dumps(os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON"))
+google_json = json.loads(google_json_str)  # Mengubah JSON string menjadi dictionary
+creds = Credentials.from_service_account_info(google_json, scopes=["https://www.googleapis.com/auth/spreadsheets"])
+client = gspread.authorize(creds)
+
 creds = Credentials.from_service_account_info(google_json, scopes=["https://www.googleapis.com/auth/spreadsheets"])
 client = gspread.authorize(creds)
 
