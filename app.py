@@ -2,7 +2,6 @@ import os
 import pandas as pd
 import gspread
 import json
-import base64
 from google.oauth2.service_account import Credentials
 from flask import Flask, jsonify
 from transformers import pipeline
@@ -11,32 +10,20 @@ import re
 
 app = Flask(__name__)
 
-# 🔹 Load Google Credentials (Dukungan Base64)
-encoded_creds = os.getenv("GOOGLE_SERVICE_ACCOUNT_BASE64")
-if encoded_creds:
-    decoded_creds = base64.b64decode(encoded_creds).decode()
-    google_json = json.loads(decoded_creds)
-else:
-    raise ValueError("GOOGLE_SERVICE_ACCOUNT_BASE64 tidak tersedia di environment variables")
-
+# 🔹 Load kredensial dari Railway Environment
+google_json = json.loads(os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON"))
 creds = Credentials.from_service_account_info(google_json, scopes=["https://www.googleapis.com/auth/spreadsheets"])
 client = gspread.authorize(creds)
 
-# 🔹 Load Google Sheet
-SHEET_URL = os.getenv("GOOGLE_SHEET_URL")
-if not SHEET_URL:
-    raise ValueError("GOOGLE_SHEET_URL tidak tersedia di environment variables")
+# 🔹 Buka Google Sheets
+SHEET_URL = os.getenv("GOOGLE_SHEET_URL")  # Ambil dari Railway
+sheet = client.open_by_url(SHEET_URL)
+worksheet = sheet.sheet1
 
-try:
-    sheet = client.open_by_url(SHEET_URL)
-    worksheet = sheet.sheet1
-except Exception as e:
-    raise ValueError(f"Error membuka Google Sheet: {str(e)}")
-
-# 🔹 Load IndoBERT Sentiment Model
+# 🔹 Load IndoBERT sentiment model
 sentiment_model = pipeline("text-classification", model="w11wo/indonesian-roberta-base-sentiment-classifier")
 
-# 🔹 Daftar Keyword dan Entitas
+# 🔹 Daftar keyword negatif dan entitas terkait ternak
 NEGATIVE_KEYWORDS = ["mati", "sakit", "lemas", "muntah", "menggigil", "kurus", "kenapa", "tolong", "meninggal", "terkapar", "demam", "lesu", "pingsan", "tidak mau makan", "drop", "lemes"]
 POSITIVE_KEYWORDS = ["sehat", "baik", "aman", "damai", "bagus", "stabil", "tidak apaapa"]
 RELEVANT_ENTITIES = ["sapi", "kerbau", "ternak", "ayam", "domba", "bebek", "kambing", "itik", "peternakan", "hewan ternak"]
@@ -46,11 +33,8 @@ VOCAB = NEGATIVE_KEYWORDS + POSITIVE_KEYWORDS + RELEVANT_ENTITIES
 
 # 🔹 Fungsi Ambil Data dari Google Sheets
 def get_data_from_sheets():
-    try:
-        data = worksheet.get_all_records()
-        return pd.DataFrame(data)
-    except Exception as e:
-        raise RuntimeError(f"Error mengambil data dari Google Sheets: {str(e)}")
+    data = worksheet.get_all_records()
+    return pd.DataFrame(data)
 
 # 🔹 Fungsi Koreksi Typo dengan RapidFuzz
 def correct_typo(text, vocab, threshold=85):
@@ -100,49 +84,38 @@ def classify_sentiment(text):
 # 🔹 Endpoint API untuk Update Sentimen
 @app.route("/update_sentiment", methods=["POST"])
 def update_sheets_with_sentiment():
-    try:
-        df = get_data_from_sheets()
-        if df.empty:
-            return jsonify({"error": "Tidak ada data dalam Google Sheets"}), 400
+    df = get_data_from_sheets()
+    
+    print("Data awal dari Google Sheets:")
+    print(df.head())
 
-        print("Data awal dari Google Sheets:")
-        print(df.head())
+    df["preprocessed_text"] = df["jawaban"].apply(preprocess_text)
+    df["sentimen_negatif"] = df["preprocessed_text"].apply(classify_sentiment)
 
-        df["preprocessed_text"] = df["jawaban"].apply(preprocess_text)
-        df["sentimen_negatif"] = df["preprocessed_text"].apply(classify_sentiment)
+    print("Data setelah klasifikasi sentimen:")
+    print(df[["jawaban", "sentimen_negatif"]].head())
 
-        print("Data setelah klasifikasi sentimen:")
-        print(df[["jawaban", "sentimen_negatif"]].head())
+    df["tanggal"] = pd.to_datetime(df["tanggal"], errors="coerce")
 
-        df["tanggal"] = pd.to_datetime(df["tanggal"], errors="coerce")
+    print("Baris dengan NaT setelah parsing:")
+    print(df[df["tanggal"].isna()])
 
-        print("Baris dengan NaT setelah parsing:")
-        print(df[df["tanggal"].isna()])
+    daily_sentiment = df.groupby("tanggal")["sentimen_negatif"].sum().reset_index()
+    daily_sentiment = daily_sentiment.dropna(subset=["tanggal"])
+    df["tanggal"] = df["tanggal"].astype(str)
+    daily_sentiment["tanggal"] = daily_sentiment["tanggal"].dt.strftime("%Y-%m-%d")
 
-        daily_sentiment = df.groupby("tanggal")["sentimen_negatif"].sum().reset_index()
-        daily_sentiment = daily_sentiment.dropna(subset=["tanggal"])
+    print("Data agregasi sentimen per hari:")
+    print(daily_sentiment.head())
 
-        # Format tanggal sebelum update ke Google Sheets
-        df["tanggal"] = df["tanggal"].astype(str)
-        daily_sentiment["tanggal"] = daily_sentiment["tanggal"].dt.strftime("%Y-%m-%d")
+    worksheet.update("A1", [df.columns.tolist()] + df.values.tolist())
+    print("Data utama diperbarui di Google Sheets.")
 
-        print("Data agregasi sentimen per hari:")
-        print(daily_sentiment.head())
+    daily_worksheet = sheet.worksheet("daily_sentiment")
+    daily_worksheet.update("A1", [daily_sentiment.columns.tolist()] + daily_sentiment.values.tolist())
+    print("Data agregasi diperbarui di Google Sheets.")
 
-        # Update data utama ke Google Sheets
-        worksheet.update("A1", [df.columns.tolist()] + df.values.tolist())
-        print("Data utama diperbarui di Google Sheets.")
-
-        # Update data agregasi ke worksheet "daily_sentiment"
-        daily_worksheet = sheet.worksheet("daily_sentiment")
-        daily_worksheet.update("A1", [daily_sentiment.columns.tolist()] + daily_sentiment.values.tolist())
-        print("Data agregasi diperbarui di Google Sheets.")
-
-        return jsonify({"message": "Sentimen & agregasi berhasil diperbarui", "total": len(df)})
-
-    except Exception as e:
-        print(f"Error dalam proses update: {str(e)}")
-        return jsonify({"error": str(e)}), 500
+    return jsonify({"message": "Sentimen & agregasi berhasil diperbarui", "total": len(df)})
 
 # 🔹 Endpoint API untuk Cek Status
 @app.route("/")
